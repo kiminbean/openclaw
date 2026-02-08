@@ -9,19 +9,28 @@ vi.mock("./compact.js", () => ({
 }));
 
 vi.mock("./model.js", () => ({
-  resolveModel: vi.fn(() => ({
-    model: {
-      id: "test-model",
-      provider: "anthropic",
-      contextWindow: 200000,
-      api: "messages",
-    },
-    error: null,
-    authStorage: {
-      setRuntimeApiKey: vi.fn(),
-    },
-    modelRegistry: {},
-  })),
+  resolveModel: vi.fn((provider: string, modelId: string) => {
+    const isVision = provider === "zai" && modelId === "glm-4.6v";
+    return {
+      model: {
+        id: modelId,
+        name: modelId,
+        provider,
+        baseUrl: "https://api.z.ai/api/coding/paas/v4",
+        contextWindow: isVision ? 128000 : 200000,
+        api: "openai-completions",
+        reasoning: true,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        maxTokens: 8192,
+        input: isVision ? ["text", "image"] : ["text"],
+      },
+      error: undefined,
+      authStorage: {
+        setRuntimeApiKey: vi.fn(),
+      },
+      modelRegistry: {},
+    };
+  }),
 }));
 
 vi.mock("../model-auth.js", () => ({
@@ -149,11 +158,13 @@ vi.mock("../pi-embedded-helpers.js", async () => {
 import type { EmbeddedRunAttemptResult } from "./run/types.js";
 import { compactEmbeddedPiSessionDirect } from "./compact.js";
 import { log } from "./logger.js";
+import { resolveModel } from "./model.js";
 import { runEmbeddedPiAgent } from "./run.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
 
 const mockedRunEmbeddedAttempt = vi.mocked(runEmbeddedAttempt);
 const mockedCompactDirect = vi.mocked(compactEmbeddedPiSessionDirect);
+const mockedResolveModel = vi.mocked(resolveModel);
 
 function makeAttemptResult(
   overrides: Partial<EmbeddedRunAttemptResult> = {},
@@ -222,6 +233,42 @@ describe("overflow compaction in run loop", () => {
     expect(log.info).toHaveBeenCalledWith(expect.stringContaining("auto-compaction succeeded"));
     // Should not be an error result
     expect(result.meta.error).toBeUndefined();
+  });
+
+  it("auto-switches to configured image model when prompt includes image and primary is text-only", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...baseParams,
+      provider: "zai",
+      model: "glm-4.7",
+      prompt: "[media attached: ./image.jpg (image/jpeg) | ./image.jpg] 이미지 분석해줘",
+      config: {
+        agents: {
+          defaults: {
+            imageModel: {
+              primary: "zai/glm-4.6v",
+            },
+          },
+        },
+      },
+    });
+
+    expect(mockedResolveModel).toHaveBeenCalledWith(
+      "zai",
+      "glm-4.7",
+      "/tmp/agent-dir",
+      expect.anything(),
+    );
+    expect(mockedResolveModel).toHaveBeenCalledWith(
+      "zai",
+      "glm-4.6v",
+      "/tmp/agent-dir",
+      expect.anything(),
+    );
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "zai", modelId: "glm-4.6v" }),
+    );
   });
 
   it("returns error if compaction fails", async () => {

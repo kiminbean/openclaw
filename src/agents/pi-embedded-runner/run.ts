@@ -25,7 +25,7 @@ import {
   resolveAuthProfileOrder,
   type ResolvedProviderAuth,
 } from "../model-auth.js";
-import { normalizeProviderId } from "../model-selection.js";
+import { normalizeProviderId, parseModelRef } from "../model-selection.js";
 import { ensureOpenClawModelsJson } from "../models-config.js";
 import {
   BILLING_ERROR_USER_MESSAGE,
@@ -51,6 +51,7 @@ import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
 import { log } from "./logger.js";
 import { resolveModel } from "./model.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
+import { detectImageReferences, modelSupportsImages } from "./run/images.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
 import { describeUnknownError } from "./utils.js";
 
@@ -68,6 +69,21 @@ function scrubAnthropicRefusalMagic(prompt: string): string {
     ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL,
     ANTHROPIC_MAGIC_STRING_REPLACEMENT,
   );
+}
+
+function resolveConfiguredImageModelRef(params: {
+  cfg?: RunEmbeddedPiAgentParams["config"];
+  defaultProvider: string;
+}): { provider: string; model: string } | null {
+  const imageModel = params.cfg?.agents?.defaults?.imageModel as
+    | string
+    | { primary?: string }
+    | undefined;
+  const primary = typeof imageModel === "string" ? imageModel : imageModel?.primary;
+  if (!primary?.trim()) {
+    return null;
+  }
+  return parseModelRef(primary, params.defaultProvider);
 }
 
 export async function runEmbeddedPiAgent(
@@ -109,14 +125,14 @@ export async function runEmbeddedPiAgent(
       }
       const prevCwd = process.cwd();
 
-      const provider = (params.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
-      const modelId = (params.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+      let provider = (params.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+      let modelId = (params.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
       const agentDir = params.agentDir ?? resolveOpenClawAgentDir();
       const fallbackConfigured =
         (params.config?.agents?.defaults?.model?.fallbacks?.length ?? 0) > 0;
       await ensureOpenClawModelsJson(params.config, agentDir);
 
-      const { model, error, authStorage, modelRegistry } = resolveModel(
+      let { model, error, authStorage, modelRegistry } = resolveModel(
         provider,
         modelId,
         agentDir,
@@ -124,6 +140,34 @@ export async function runEmbeddedPiAgent(
       );
       if (!model) {
         throw new Error(error ?? `Unknown model: ${provider}/${modelId}`);
+      }
+
+      const hasPromptImages =
+        (params.images?.length ?? 0) > 0 || detectImageReferences(params.prompt).length > 0;
+      if (hasPromptImages && !modelSupportsImages(model)) {
+        const imageRef = resolveConfiguredImageModelRef({
+          cfg: params.config,
+          defaultProvider: provider,
+        });
+        if (imageRef) {
+          const resolvedImageModel = resolveModel(
+            imageRef.provider,
+            imageRef.model,
+            agentDir,
+            params.config,
+          );
+          if (resolvedImageModel.model && modelSupportsImages(resolvedImageModel.model)) {
+            log.info(
+              `image detected in prompt; switching model ${provider}/${modelId} -> ${imageRef.provider}/${imageRef.model}`,
+            );
+            provider = imageRef.provider;
+            modelId = imageRef.model;
+            model = resolvedImageModel.model;
+            error = resolvedImageModel.error;
+            authStorage = resolvedImageModel.authStorage;
+            modelRegistry = resolvedImageModel.modelRegistry;
+          }
+        }
       }
 
       const ctxInfo = resolveContextWindowInfo({

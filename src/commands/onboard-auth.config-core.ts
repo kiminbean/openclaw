@@ -99,7 +99,7 @@ export function applyZaiConfig(cfg: OpenClawConfig): OpenClawConfig {
   const normalizedApiKey = resolvedApiKey?.trim();
   providers.zai = {
     ...existingProviderRest,
-    baseUrl: existingBaseUrl ?? "https://api.z.ai/api/paas/v4",
+    baseUrl: existingBaseUrl ?? "https://api.z.ai/api/coding/paas/v4",
     api: existingApi ?? "openai-completions",
     ...(normalizedApiKey ? { apiKey: normalizedApiKey } : {}),
     models: mergedModels,
